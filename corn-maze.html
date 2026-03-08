@@ -1,0 +1,1497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Corn Maze</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; height: 100vh; }
+  canvas { display: block; max-width: 100vw; max-height: 100vh; image-rendering: auto; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const C = document.getElementById('c');
+const X = C.getContext('2d');
+const W = 960, H = 600;
+C.width = W; C.height = H;
+
+const FOV = Math.PI / 3;
+const MOVE_SPD = 0.045;
+const ROT_SPD = 0.045;
+const LEVELS = [
+  { cols: 5, rows: 5, name: "The Gentle Stroll" },
+  { cols: 8, rows: 8, name: "Getting Interesting" },
+  { cols: 12, rows: 12, name: "The Corn Thickens" },
+  { cols: 16, rows: 16, name: "Labyrinth of Cobs" },
+  { cols: 22, rows: 22, name: "The Final Harvest" }
+];
+
+const DEAD_END_COMMENTS = [
+  "Well... that's a wall of corn.",
+  "The corn has spoken. Turn around.",
+  "Nope. Definitely nope.",
+  "I feel like this corn stalk is judging me.",
+  "Another dead end. Maze: 5, Me: 0.",
+  "I swear I've smelled this exact corn before.",
+  "Plot twist: there is no exit. Just corn. Forever.",
+  "My therapist warned me about this.",
+  "The corn judges silently. But it judges.",
+  "I'm not lost. I'm on a scenic detour.",
+  "This corn looks suspiciously familiar...",
+  "Note to self: never trust 'fun autumn activities' again.",
+  "If I were a corn stalk, I wouldn't let me through either.",
+  "I should've left breadcrumbs.",
+  "Day 437 in the maze. Still optimistic. Mostly.",
+  "At least the corn doesn't charge rent.",
+  "I'm starting to think the corn is winning."
+];
+
+const AMBIENT_COMMENTS = [
+  "Nice corn. Real nice corn.",
+  "I wonder what corn dreams about.",
+  "Corn maze tip #1: bring snacks.",
+  "Is it just me, or is this corn... watching?",
+  "At least the weather's nice.",
+  "*whistles softly*",
+  "I should've brought a sandwich.",
+  "This would make a great screensaver.",
+  "The corn smells oddly pleasant today.",
+  "Left, right... does it even matter anymore?"
+];
+
+const TURN_COMMENTS = [
+  "Strategic retreat!",
+  "Tactical repositioning.",
+  "We don't talk about what just happened.",
+  "The ol' 180. A classic move.",
+  "I absolutely meant to do that."
+];
+
+// -- Game State --
+let state = 'title';
+let level = 0;
+let map, mapW, mapH;
+let px, py, pa; // player position & angle
+let keys = {};
+let bobPhase = 0, bobActive = false;
+let comment = null, commentTimer = 0, commentCooldown = 0;
+let visitedDeadEnds = new Set();
+let explored = new Set();
+let celebFrame = 0;
+let particles = [];
+let celebEntities = [];
+let gameTimer = 0;
+let exitCellX, exitCellY;
+let dustMotes = [];
+let ambientTimer = 0;
+let prevAngle = 0;
+let totalTime = 0;
+
+// -- Dust Motes --
+function initDust() {
+  dustMotes = [];
+  for (let i = 0; i < 25; i++) {
+    dustMotes.push({
+      x: Math.random() * W, y: Math.random() * H * 0.7 + H * 0.05,
+      speed: 0.15 + Math.random() * 0.3, size: 1 + Math.random() * 2,
+      alpha: 0.15 + Math.random() * 0.2, phase: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+// -- Maze Generation (iterative backtracker) --
+function generateMaze(cols, rows) {
+  const w = cols * 2 + 1, h = rows * 2 + 1;
+  const m = [];
+  for (let y = 0; y < h; y++) { m[y] = []; for (let x = 0; x < w; x++) m[y][x] = 1; }
+
+  const vis = [];
+  for (let y = 0; y < rows; y++) { vis[y] = []; for (let x = 0; x < cols; x++) vis[y][x] = false; }
+
+  const stack = [];
+  let cx = 0, cy = 0;
+  vis[0][0] = true;
+  m[1][1] = 0;
+  stack.push([0, 0]);
+
+  const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+
+  while (stack.length > 0) {
+    const nbrs = [];
+    for (const [dx, dy] of dirs) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !vis[ny][nx]) nbrs.push([nx, ny, dx, dy]);
+    }
+    if (nbrs.length > 0) {
+      const [nx, ny, dx, dy] = nbrs[Math.floor(Math.random() * nbrs.length)];
+      m[cy * 2 + 1 + dy][cx * 2 + 1 + dx] = 0;
+      m[ny * 2 + 1][nx * 2 + 1] = 0;
+      vis[ny][nx] = true;
+      stack.push([cx, cy]);
+      cx = nx; cy = ny;
+    } else {
+      [cx, cy] = stack.pop();
+    }
+  }
+
+  // Open exit at bottom of bottom-right cell
+  exitCellX = (cols - 1) * 2 + 1;
+  exitCellY = (rows - 1) * 2 + 1;
+  m[rows * 2][exitCellX] = 2; // exit marker (open south wall)
+
+  return { map: m, width: w, height: h };
+}
+
+function startLevel(lvl) {
+  level = lvl;
+  const L = LEVELS[lvl];
+  const maze = generateMaze(L.cols, L.rows);
+  map = maze.map; mapW = maze.width; mapH = maze.height;
+  px = 1.5; py = 1.5; pa = 0;
+  prevAngle = 0;
+  visitedDeadEnds = new Set();
+  explored = new Set();
+  comment = null; commentTimer = 0; commentCooldown = 0;
+  ambientTimer = 300 + Math.random() * 400;
+  gameTimer = 0;
+  bobPhase = 0;
+  initDust();
+  state = 'playing';
+}
+
+// -- Input --
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key === 'Enter') {
+    if (state === 'title') startLevel(0);
+    else if (state === 'celebrating' && celebFrame > 180) {
+      if (level < 4) startLevel(level + 1);
+      else state = 'complete';
+    } else if (state === 'complete') { state = 'title'; level = 0; }
+  }
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// -- Player Update --
+function updatePlayer() {
+  let moved = false;
+  const cos = Math.cos(pa), sin = Math.sin(pa);
+
+  if (keys['ArrowLeft'] || keys['a']) pa -= ROT_SPD;
+  if (keys['ArrowRight'] || keys['d']) pa += ROT_SPD;
+
+  let nx = px, ny = py;
+  if (keys['ArrowUp'] || keys['w']) { nx += cos * MOVE_SPD; ny += sin * MOVE_SPD; moved = true; }
+  if (keys['ArrowDown'] || keys['s']) { nx -= cos * MOVE_SPD * 0.6; ny -= sin * MOVE_SPD * 0.6; moved = true; }
+
+  // Collision with buffer
+  const buf = 0.2;
+  if (canMove(nx, py, buf)) px = nx; else moved = false;
+  if (canMove(px, ny, buf)) py = ny; else moved = false;
+
+  bobActive = moved;
+  if (moved) bobPhase += 0.12;
+
+  // Track explored cells
+  explored.add(`${Math.floor(px)},${Math.floor(py)}`);
+
+  // Check exit
+  if (py > mapH - 0.3) {
+    state = 'celebrating';
+    celebFrame = 0;
+    particles = [];
+    celebEntities = [];
+    totalTime += gameTimer;
+    initCelebration(level);
+  }
+
+  // Dead end detection
+  if (commentCooldown > 0) commentCooldown--;
+  if (moved && commentCooldown === 0) {
+    const cellKey = `${Math.floor(px)},${Math.floor(py)}`;
+    if (isDeadEnd(Math.floor(px), Math.floor(py)) && !visitedDeadEnds.has(cellKey)) {
+      visitedDeadEnds.add(cellKey);
+      showComment(DEAD_END_COMMENTS[Math.floor(Math.random() * DEAD_END_COMMENTS.length)]);
+      commentCooldown = 180;
+    }
+  }
+
+  // Turn around detection
+  const angleDiff = Math.abs(pa - prevAngle);
+  if (angleDiff > 2.8 && angleDiff < 3.5 && commentCooldown === 0) {
+    showComment(TURN_COMMENTS[Math.floor(Math.random() * TURN_COMMENTS.length)]);
+    commentCooldown = 200;
+  }
+  if (moved) prevAngle = pa;
+
+  // Ambient comments
+  ambientTimer--;
+  if (ambientTimer <= 0 && commentCooldown === 0) {
+    showComment(AMBIENT_COMMENTS[Math.floor(Math.random() * AMBIENT_COMMENTS.length)]);
+    commentCooldown = 300;
+    ambientTimer = 500 + Math.random() * 600;
+  }
+
+  gameTimer++;
+  if (commentTimer > 0) commentTimer--;
+  if (commentTimer === 0) comment = null;
+}
+
+function canMove(x, y, buf) {
+  const checks = [[x-buf,y-buf],[x+buf,y-buf],[x-buf,y+buf],[x+buf,y+buf]];
+  for (const [cx, cy] of checks) {
+    const mx = Math.floor(cx), my = Math.floor(cy);
+    if (mx < 0 || mx >= mapW || my < 0 || my >= mapH) {
+      // Allow moving past exit
+      if (my >= mapH && mx === exitCellX) continue;
+      return false;
+    }
+    if (map[my][mx] === 1) return false;
+  }
+  return true;
+}
+
+function isDeadEnd(mx, my) {
+  if (mx < 0 || mx >= mapW || my < 0 || my >= mapH) return false;
+  if (map[my][mx] !== 0) return false;
+  let open = 0;
+  if (my > 0 && map[my-1][mx] !== 1) open++;
+  if (my < mapH-1 && map[my+1][mx] !== 1) open++;
+  if (mx > 0 && map[my][mx-1] !== 1) open++;
+  if (mx < mapW-1 && map[my][mx+1] !== 1) open++;
+  return open <= 1;
+}
+
+function showComment(text) {
+  comment = text;
+  commentTimer = 200;
+}
+
+// -- Raycasting Renderer --
+function render3D() {
+  const halfH = H / 2;
+  const bob = bobActive ? Math.sin(bobPhase) * 4 : 0;
+
+  // Sky gradient
+  const skyGrad = X.createLinearGradient(0, 0, 0, halfH);
+  skyGrad.addColorStop(0, '#6BA3BE');
+  skyGrad.addColorStop(0.5, '#A8CFD8');
+  skyGrad.addColorStop(0.85, '#F5D5A0');
+  skyGrad.addColorStop(1, '#E8B87A');
+  X.fillStyle = skyGrad;
+  X.fillRect(0, 0, W, halfH + bob);
+
+  // Floor gradient
+  const floorGrad = X.createLinearGradient(0, halfH + bob, 0, H);
+  floorGrad.addColorStop(0, '#8B7355');
+  floorGrad.addColorStop(0.3, '#7A6548');
+  floorGrad.addColorStop(1, '#5A4A35');
+  X.fillStyle = floorGrad;
+  X.fillRect(0, halfH + bob, W, H);
+
+  // Cast rays
+  const numRays = W;
+  for (let i = 0; i < numRays; i++) {
+    const rayAngle = pa - FOV / 2 + (i / numRays) * FOV;
+    const rcos = Math.cos(rayAngle), rsin = Math.sin(rayAngle);
+
+    let mx = Math.floor(px), my = Math.floor(py);
+    const ddx = Math.abs(1 / (rcos || 0.0001));
+    const ddy = Math.abs(1 / (rsin || 0.0001));
+
+    let stepX, stepY, sdx, sdy;
+    if (rcos < 0) { stepX = -1; sdx = (px - mx) * ddx; }
+    else { stepX = 1; sdx = (mx + 1 - px) * ddx; }
+    if (rsin < 0) { stepY = -1; sdy = (py - my) * ddy; }
+    else { stepY = 1; sdy = (my + 1 - py) * ddy; }
+
+    let hit = false, side = 0, dist = 0, cellVal = 0;
+    for (let s = 0; s < 60; s++) {
+      if (sdx < sdy) { sdx += ddx; mx += stepX; side = 0; }
+      else { sdy += ddy; my += stepY; side = 1; }
+
+      if (mx < 0 || mx >= mapW || my < 0 || my >= mapH) { hit = true; cellVal = 1; break; }
+      if (map[my][mx] >= 1) { hit = true; cellVal = map[my][mx]; break; }
+    }
+    if (!hit) continue;
+
+    // Perpendicular distance
+    if (side === 0) dist = (mx - px + (1 - stepX) / 2) / rcos;
+    else dist = (my - py + (1 - stepY) / 2) / rsin;
+    dist = Math.max(dist, 0.1);
+
+    // Fix fisheye
+    const perpDist = dist * Math.cos(rayAngle - pa);
+    const wallH = H / perpDist;
+    const wallTop = halfH - wallH / 2 + bob;
+    const wallBot = halfH + wallH / 2 + bob;
+
+    // Wall texture coordinate (0-1)
+    let wallX;
+    if (side === 0) wallX = py + dist * rsin;
+    else wallX = px + dist * rcos;
+    wallX -= Math.floor(wallX);
+
+    // Corn sway
+    const sway = Math.sin(gameTimer * 0.015 + mx * 3.7 + my * 5.3) * 0.015;
+    wallX = (wallX + sway + 1) % 1;
+
+    // Color calculation
+    const fogFactor = Math.min(1, perpDist / 14);
+    const sideMul = side === 0 ? 1.0 : 0.75;
+
+    // Corn texture: vertical stalks with color variation
+    const stalkFreq = 8;
+    const stalkPhase = (wallX * stalkFreq) % 1;
+    const isStalk = stalkPhase < 0.55;
+
+    let r, g, b;
+    if (cellVal === 2) {
+      // Exit - golden glow
+      r = 220; g = 190; b = 80;
+      const glow = 0.7 + 0.3 * Math.sin(gameTimer * 0.05);
+      r *= glow; g *= glow; b *= glow;
+    } else if (isStalk) {
+      // Corn stalk - greens and golds
+      const variation = Math.sin(wallX * 47 + mx * 13 + my * 7) * 0.15;
+      r = 95 + variation * 40;
+      g = 120 + variation * 30 + Math.sin(wallX * 23) * 15;
+      b = 45 + variation * 20;
+    } else {
+      // Between stalks - darker, more shadow
+      r = 65; g = 85; b = 35;
+    }
+
+    // Leaf detail - occasional lighter patches
+    const leafNoise = Math.sin(wallX * 31 + mx * 17) * Math.cos(wallX * 19 + my * 11);
+    if (leafNoise > 0.5) { r += 25; g += 15; b += 5; }
+
+    // Apply side shading and fog
+    r = r * sideMul * (1 - fogFactor) + 200 * fogFactor;
+    g = g * sideMul * (1 - fogFactor) + 185 * fogFactor;
+    b = b * sideMul * (1 - fogFactor) + 140 * fogFactor;
+
+    r = Math.floor(Math.max(0, Math.min(255, r)));
+    g = Math.floor(Math.max(0, Math.min(255, g)));
+    b = Math.floor(Math.max(0, Math.min(255, b)));
+
+    X.fillStyle = `rgb(${r},${g},${b})`;
+    X.fillRect(i, Math.max(0, wallTop), 1, Math.min(H, wallBot) - Math.max(0, wallTop));
+  }
+
+  // Dust motes
+  X.globalAlpha = 1;
+  for (const d of dustMotes) {
+    d.x += d.speed;
+    d.y += Math.sin(gameTimer * 0.01 + d.phase) * 0.2;
+    if (d.x > W + 10) d.x = -10;
+    if (d.y < 0 || d.y > H) d.y = Math.random() * H * 0.6 + H * 0.05;
+    X.globalAlpha = d.alpha;
+    X.fillStyle = '#F5D5A0';
+    X.beginPath();
+    X.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+    X.fill();
+  }
+  X.globalAlpha = 1;
+
+  // Vignette
+  const vigGrad = X.createRadialGradient(W/2, H/2, H * 0.35, W/2, H/2, H * 0.85);
+  vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vigGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  X.fillStyle = vigGrad;
+  X.fillRect(0, 0, W, H);
+}
+
+// -- Minimap --
+function renderMinimap() {
+  const size = 4;
+  const radius = 7; // cells visible around player
+  const pmx = Math.floor(px), pmy = Math.floor(py);
+  const startX = pmx - radius, startY = pmy - radius;
+  const mmW = (radius * 2 + 1) * size;
+  const ox = W - mmW - 15, oy = 15;
+
+  X.globalAlpha = 0.6;
+  X.fillStyle = '#1a1a1a';
+  X.fillRect(ox - 3, oy - 3, mmW + 6, mmW + 6);
+
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const mx = pmx + dx, my = pmy + dy;
+      const sx = ox + (dx + radius) * size;
+      const sy = oy + (dy + radius) * size;
+
+      if (mx < 0 || mx >= mapW || my < 0 || my >= mapH) {
+        X.fillStyle = '#333';
+        X.fillRect(sx, sy, size, size);
+        continue;
+      }
+
+      if (!explored.has(`${mx},${my}`) && Math.abs(dx) + Math.abs(dy) > 3) {
+        X.fillStyle = '#222';
+        X.fillRect(sx, sy, size, size);
+        continue;
+      }
+
+      if (map[my][mx] === 1) X.fillStyle = '#3a5a2a';
+      else if (map[my][mx] === 2) X.fillStyle = '#c8a040';
+      else X.fillStyle = '#8a7a5a';
+      X.fillRect(sx, sy, size, size);
+    }
+  }
+
+  // Player dot
+  const pdx = ox + radius * size + size / 2;
+  const pdy = oy + radius * size + size / 2;
+  X.fillStyle = '#ff6644';
+  X.beginPath();
+  X.arc(pdx, pdy, 3, 0, Math.PI * 2);
+  X.fill();
+  // Direction line
+  X.strokeStyle = '#ff6644';
+  X.lineWidth = 1.5;
+  X.beginPath();
+  X.moveTo(pdx, pdy);
+  X.lineTo(pdx + Math.cos(pa) * 8, pdy + Math.sin(pa) * 8);
+  X.stroke();
+
+  X.globalAlpha = 1;
+}
+
+// -- HUD --
+function renderHUD() {
+  X.font = '13px Georgia, serif';
+  X.fillStyle = 'rgba(245,213,160,0.7)';
+  X.textAlign = 'left';
+  const secs = Math.floor(gameTimer / 60);
+  const mins = Math.floor(secs / 60);
+  X.fillText(`Level ${level + 1}: ${LEVELS[level].name}`, 15, 25);
+  X.fillText(`Time: ${mins}:${(secs % 60).toString().padStart(2, '0')}`, 15, 45);
+
+  // Compass
+  const dirs = ['E', 'S', 'W', 'N'];
+  const normalAngle = ((pa % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const dirIdx = Math.round(normalAngle / (Math.PI / 2)) % 4;
+  X.font = '16px Georgia, serif';
+  X.textAlign = 'center';
+  X.fillStyle = 'rgba(245,213,160,0.5)';
+  X.fillText(dirs[dirIdx], W / 2, 25);
+}
+
+// -- Comment Bubble --
+function renderComment() {
+  if (!comment || commentTimer <= 0) return;
+  const alpha = Math.min(1, commentTimer / 30);
+  X.globalAlpha = alpha;
+
+  X.font = 'italic 16px Georgia, serif';
+  X.textAlign = 'center';
+  const tw = X.measureText(comment).width + 30;
+  const bx = W / 2 - tw / 2, by = H - 80;
+
+  X.fillStyle = 'rgba(15,12,8,0.75)';
+  roundRect(X, bx, by, tw, 36, 12);
+  X.fill();
+
+  X.fillStyle = '#E8D5B0';
+  X.fillText(comment, W / 2, by + 23);
+  X.globalAlpha = 1;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// -- Title Screen --
+function renderTitle() {
+  // Background
+  const bg = X.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#1a2a15');
+  bg.addColorStop(0.5, '#2a3a1a');
+  bg.addColorStop(1, '#1a1508');
+  X.fillStyle = bg;
+  X.fillRect(0, 0, W, H);
+
+  // Corn stalks decoration
+  for (let i = 0; i < 20; i++) {
+    const sx = i * 50 + 15;
+    const sway = Math.sin(Date.now() * 0.001 + i * 1.3) * 5;
+    X.strokeStyle = `rgba(${80 + i * 4},${100 + i * 3},${40 + i * 2},0.4)`;
+    X.lineWidth = 3;
+    X.beginPath();
+    X.moveTo(sx + sway, H);
+    X.quadraticCurveTo(sx + sway * 1.5, H * 0.5, sx + sway * 2, H * 0.15);
+    X.stroke();
+    // Leaves
+    X.strokeStyle = `rgba(90,120,45,0.3)`;
+    X.lineWidth = 2;
+    X.beginPath();
+    X.moveTo(sx + sway * 1.2, H * 0.6);
+    X.quadraticCurveTo(sx + sway + 20, H * 0.55, sx + sway + 30, H * 0.58);
+    X.stroke();
+  }
+
+  // Title
+  X.textAlign = 'center';
+  X.font = 'bold 72px Georgia, serif';
+  X.fillStyle = '#C8A96E';
+  X.fillText('THE CORN MAZE', W / 2, H * 0.32);
+
+  X.font = 'italic 20px Georgia, serif';
+  X.fillStyle = '#8a9a6a';
+  X.fillText('A Relaxing Journey Through Increasingly Absurd Corn', W / 2, H * 0.42);
+
+  // Instructions
+  X.font = '16px Georgia, serif';
+  X.fillStyle = '#7a8a5a';
+  X.fillText('Arrow Keys to move and look around', W / 2, H * 0.58);
+  X.fillText('Find the golden exit to complete each maze', W / 2, H * 0.64);
+  X.fillText('5 levels of escalating corn-based chaos await', W / 2, H * 0.70);
+
+  // Start prompt
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.003);
+  X.globalAlpha = 0.5 + pulse * 0.5;
+  X.font = '22px Georgia, serif';
+  X.fillStyle = '#C8A96E';
+  X.fillText('Press ENTER to begin', W / 2, H * 0.85);
+  X.globalAlpha = 1;
+}
+
+// ==================== CELEBRATIONS ====================
+
+class Particle {
+  constructor(x, y, vx, vy, color, size, life) {
+    this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+    this.color = color; this.size = size; this.life = life; this.maxLife = life;
+    this.rot = Math.random() * Math.PI * 2;
+    this.rotSpd = (Math.random() - 0.5) * 0.2;
+  }
+  update() {
+    this.x += this.vx; this.y += this.vy;
+    this.vy += 0.06; // gravity
+    this.vx *= 0.99;
+    this.rot += this.rotSpd;
+    this.life--;
+  }
+  draw(ctx) {
+    const a = Math.max(0, this.life / this.maxLife);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rot);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(-this.size / 2, -this.size / 2, this.size, this.size);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function spawnConfetti(x, y, count, colors) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 4;
+    particles.push(new Particle(
+      x, y, Math.cos(angle) * speed, Math.sin(angle) * speed - 2,
+      colors[Math.floor(Math.random() * colors.length)],
+      3 + Math.random() * 5, 120 + Math.random() * 80
+    ));
+  }
+}
+
+function spawnFirework(x, y, color) {
+  for (let i = 0; i < 40; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 5;
+    particles.push(new Particle(
+      x, y, Math.cos(angle) * speed, Math.sin(angle) * speed,
+      color, 2 + Math.random() * 3, 60 + Math.random() * 40
+    ));
+  }
+}
+
+function initCelebration(lvl) {
+  celebFrame = 0;
+  particles = [];
+  celebEntities = [];
+}
+
+function drawFarmer(x, y, scale, clapPhase) {
+  const s = scale;
+  // Body
+  X.fillStyle = '#c44'; // flannel red
+  X.fillRect(x - 12*s, y - 20*s, 24*s, 30*s);
+  // Overalls
+  X.fillStyle = '#446'; // denim
+  X.fillRect(x - 10*s, y + 5*s, 20*s, 25*s);
+  // Head
+  X.fillStyle = '#DEB887';
+  X.beginPath();
+  X.arc(x, y - 30*s, 14*s, 0, Math.PI * 2);
+  X.fill();
+  // Straw hat
+  X.fillStyle = '#D4A54A';
+  X.fillRect(x - 20*s, y - 48*s, 40*s, 8*s);
+  X.fillRect(x - 12*s, y - 56*s, 24*s, 10*s);
+  // Eyes
+  X.fillStyle = '#333';
+  X.beginPath();
+  X.arc(x - 5*s, y - 32*s, 2*s, 0, Math.PI * 2);
+  X.arc(x + 5*s, y - 32*s, 2*s, 0, Math.PI * 2);
+  X.fill();
+  // Smile
+  X.strokeStyle = '#333';
+  X.lineWidth = 1.5;
+  X.beginPath();
+  X.arc(x, y - 26*s, 6*s, 0.1, Math.PI - 0.1);
+  X.stroke();
+  // Hands clapping
+  const clap = Math.sin(clapPhase) * 8 * s;
+  X.fillStyle = '#DEB887';
+  X.beginPath();
+  X.arc(x - 15*s - clap, y - 5*s, 6*s, 0, Math.PI * 2);
+  X.arc(x + 15*s + clap, y - 5*s, 6*s, 0, Math.PI * 2);
+  X.fill();
+}
+
+function drawPerson(x, y, scale, color, armUp) {
+  const s = scale;
+  X.fillStyle = color;
+  X.fillRect(x - 8*s, y - 15*s, 16*s, 25*s);
+  X.fillStyle = '#DEB887';
+  X.beginPath();
+  X.arc(x, y - 22*s, 9*s, 0, Math.PI * 2);
+  X.fill();
+  // Arms
+  X.strokeStyle = color;
+  X.lineWidth = 3 * s;
+  if (armUp) {
+    X.beginPath();
+    X.moveTo(x - 8*s, y - 10*s);
+    X.lineTo(x - 18*s, y - 35*s);
+    X.moveTo(x + 8*s, y - 10*s);
+    X.lineTo(x + 18*s, y - 35*s);
+    X.stroke();
+  }
+}
+
+function drawElephant(x, y, scale) {
+  const s = scale;
+  // Body
+  X.fillStyle = '#888';
+  X.beginPath();
+  X.ellipse(x, y, 35*s, 25*s, 0, 0, Math.PI * 2);
+  X.fill();
+  // Legs
+  X.fillStyle = '#777';
+  X.fillRect(x - 25*s, y + 15*s, 10*s, 20*s);
+  X.fillRect(x - 10*s, y + 15*s, 10*s, 20*s);
+  X.fillRect(x + 5*s, y + 15*s, 10*s, 20*s);
+  X.fillRect(x + 20*s, y + 15*s, 10*s, 20*s);
+  // Head
+  X.fillStyle = '#888';
+  X.beginPath();
+  X.arc(x + 35*s, y - 5*s, 18*s, 0, Math.PI * 2);
+  X.fill();
+  // Trunk
+  X.strokeStyle = '#888';
+  X.lineWidth = 8*s;
+  X.beginPath();
+  X.moveTo(x + 50*s, y);
+  X.quadraticCurveTo(x + 65*s, y + 15*s, x + 55*s, y + 30*s);
+  X.stroke();
+  // Eye
+  X.fillStyle = '#333';
+  X.beginPath();
+  X.arc(x + 40*s, y - 10*s, 3*s, 0, Math.PI * 2);
+  X.fill();
+  // Party hat
+  X.fillStyle = '#e44';
+  X.beginPath();
+  X.moveTo(x + 35*s, y - 23*s);
+  X.lineTo(x + 28*s, y - 8*s);
+  X.lineTo(x + 42*s, y - 8*s);
+  X.closePath();
+  X.fill();
+}
+
+function drawWhale(x, y, scale, hasHat) {
+  const s = scale;
+  X.fillStyle = '#4477aa';
+  X.beginPath();
+  X.ellipse(x, y, 50*s, 22*s, 0, 0, Math.PI * 2);
+  X.fill();
+  // Tail
+  X.beginPath();
+  X.moveTo(x - 48*s, y);
+  X.lineTo(x - 70*s, y - 18*s);
+  X.lineTo(x - 70*s, y + 18*s);
+  X.closePath();
+  X.fill();
+  // Eye
+  X.fillStyle = '#fff';
+  X.beginPath();
+  X.arc(x + 30*s, y - 5*s, 5*s, 0, Math.PI * 2);
+  X.fill();
+  X.fillStyle = '#222';
+  X.beginPath();
+  X.arc(x + 31*s, y - 5*s, 2.5*s, 0, Math.PI * 2);
+  X.fill();
+  // Smile
+  X.strokeStyle = '#335577';
+  X.lineWidth = 2*s;
+  X.beginPath();
+  X.arc(x + 25*s, y + 3*s, 10*s, 0.2, Math.PI * 0.7);
+  X.stroke();
+  if (hasHat) {
+    // Top hat
+    X.fillStyle = '#222';
+    X.fillRect(x + 10*s, y - 38*s, 25*s, 20*s);
+    X.fillRect(x + 5*s, y - 20*s, 35*s, 5*s);
+  }
+}
+
+function drawUFO(x, y, scale, beamOn) {
+  const s = scale;
+  // Beam
+  if (beamOn) {
+    X.fillStyle = 'rgba(150,255,150,0.15)';
+    X.beginPath();
+    X.moveTo(x - 15*s, y + 10*s);
+    X.lineTo(x - 50*s, y + 200*s);
+    X.lineTo(x + 50*s, y + 200*s);
+    X.lineTo(x + 15*s, y + 10*s);
+    X.closePath();
+    X.fill();
+  }
+  // Body
+  X.fillStyle = '#aaa';
+  X.beginPath();
+  X.ellipse(x, y, 35*s, 10*s, 0, 0, Math.PI * 2);
+  X.fill();
+  // Dome
+  X.fillStyle = 'rgba(180,220,255,0.7)';
+  X.beginPath();
+  X.ellipse(x, y - 5*s, 15*s, 12*s, 0, Math.PI, 0);
+  X.fill();
+  // Lights
+  const colors = ['#f44', '#4f4', '#44f', '#ff4'];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + celebFrame * 0.05;
+    X.fillStyle = colors[i % 4];
+    X.beginPath();
+    X.arc(x + Math.cos(a) * 28*s, y + Math.sin(a) * 5*s, 3*s, 0, Math.PI * 2);
+    X.fill();
+  }
+}
+
+function drawCatInSombrero(x, y, scale) {
+  const s = scale;
+  // Body
+  X.fillStyle = '#e8a840';
+  X.beginPath();
+  X.ellipse(x, y, 10*s, 8*s, 0, 0, Math.PI * 2);
+  X.fill();
+  // Head
+  X.beginPath();
+  X.arc(x + 10*s, y - 5*s, 7*s, 0, Math.PI * 2);
+  X.fill();
+  // Ears
+  X.beginPath();
+  X.moveTo(x + 5*s, y - 10*s);
+  X.lineTo(x + 8*s, y - 18*s);
+  X.lineTo(x + 12*s, y - 10*s);
+  X.moveTo(x + 10*s, y - 10*s);
+  X.lineTo(x + 14*s, y - 18*s);
+  X.lineTo(x + 17*s, y - 10*s);
+  X.fill();
+  // Whiskers
+  X.strokeStyle = '#a07030';
+  X.lineWidth = 1;
+  X.beginPath();
+  X.moveTo(x + 15*s, y - 5*s); X.lineTo(x + 25*s, y - 8*s);
+  X.moveTo(x + 15*s, y - 3*s); X.lineTo(x + 25*s, y - 2*s);
+  X.stroke();
+  // Sombrero
+  X.fillStyle = '#c44';
+  X.beginPath();
+  X.ellipse(x + 10*s, y - 15*s, 14*s, 4*s, 0, 0, Math.PI * 2);
+  X.fill();
+  X.fillStyle = '#d55';
+  X.beginPath();
+  X.ellipse(x + 10*s, y - 18*s, 7*s, 6*s, 0, 0, Math.PI * 2);
+  X.fill();
+  // Tiny parachute
+  X.strokeStyle = '#aaa';
+  X.lineWidth = 1;
+  X.beginPath();
+  X.moveTo(x + 5*s, y - 22*s); X.lineTo(x + 10*s, y - 50*s);
+  X.moveTo(x + 15*s, y - 22*s); X.lineTo(x + 10*s, y - 50*s);
+  X.stroke();
+  X.fillStyle = 'rgba(255,255,255,0.5)';
+  X.beginPath();
+  X.arc(x + 10*s, y - 50*s, 12*s, Math.PI, 0);
+  X.fill();
+}
+
+function drawTrumpet(x, y, scale, angle) {
+  const s = scale;
+  X.save();
+  X.translate(x, y);
+  X.rotate(angle);
+  X.fillStyle = '#DAA520';
+  X.fillRect(0, -3*s, 25*s, 6*s);
+  X.beginPath();
+  X.moveTo(25*s, -8*s);
+  X.lineTo(35*s, -12*s);
+  X.lineTo(35*s, 12*s);
+  X.lineTo(25*s, 8*s);
+  X.closePath();
+  X.fill();
+  // Music notes
+  X.fillStyle = '#fff';
+  X.font = `${12*s}px serif`;
+  X.fillText('\u266B', 38*s, -5*s);
+  X.fillText('\u266A', 45*s, -15*s);
+  X.restore();
+}
+
+function celebrationBg(type) {
+  let g;
+  switch(type) {
+    case 'farm':
+      g = X.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, '#87CEEB');
+      g.addColorStop(0.5, '#87CEEB');
+      g.addColorStop(0.5, '#5a8a3a');
+      g.addColorStop(1, '#3a6a2a');
+      X.fillStyle = g;
+      X.fillRect(0, 0, W, H);
+      // Sun
+      X.fillStyle = '#FFD700';
+      X.beginPath();
+      X.arc(W * 0.8, H * 0.15, 40, 0, Math.PI * 2);
+      X.fill();
+      break;
+    case 'town':
+      g = X.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, '#6BA3BE');
+      g.addColorStop(0.4, '#E8B87A');
+      g.addColorStop(0.4, '#8B7355');
+      g.addColorStop(1, '#6a5a42');
+      X.fillStyle = g;
+      X.fillRect(0, 0, W, H);
+      // Buildings in background
+      for (let i = 0; i < 8; i++) {
+        X.fillStyle = `hsl(${20 + i * 5}, 30%, ${25 + i * 3}%)`;
+        const bh = 80 + Math.sin(i * 2.3) * 40;
+        X.fillRect(i * 125 - 10, H * 0.4 - bh, 110, bh);
+        // Windows
+        X.fillStyle = '#FFD89B';
+        for (let wy = 0; wy < bh - 20; wy += 25) {
+          for (let wx = 10; wx < 100; wx += 25) {
+            X.fillRect(i * 125 - 10 + wx, H * 0.4 - bh + 10 + wy, 12, 15);
+          }
+        }
+      }
+      break;
+    case 'night':
+      X.fillStyle = '#0a0a2a';
+      X.fillRect(0, 0, W, H);
+      // Stars
+      for (let i = 0; i < 100; i++) {
+        const sx = (i * 137.5 + celebFrame * 0.02) % W;
+        const sy = (i * 73.1) % (H * 0.6);
+        const twinkle = 0.3 + 0.7 * Math.abs(Math.sin(celebFrame * 0.03 + i));
+        X.globalAlpha = twinkle;
+        X.fillStyle = '#fff';
+        X.beginPath();
+        X.arc(sx, sy, 1 + (i % 3) * 0.5, 0, Math.PI * 2);
+        X.fill();
+      }
+      X.globalAlpha = 1;
+      // Ground
+      X.fillStyle = '#1a2a15';
+      X.fillRect(0, H * 0.7, W, H * 0.3);
+      break;
+    case 'stadium':
+      X.fillStyle = '#1a1a2a';
+      X.fillRect(0, 0, W, H);
+      // Stadium lights
+      for (let i = 0; i < 6; i++) {
+        const lx = 80 + i * 160;
+        X.fillStyle = '#333';
+        X.fillRect(lx - 3, 0, 6, H * 0.3);
+        X.fillStyle = `rgba(255,255,200,${0.5 + 0.3 * Math.sin(celebFrame * 0.05 + i)})`;
+        X.beginPath();
+        X.arc(lx, H * 0.08, 25, 0, Math.PI * 2);
+        X.fill();
+        // Light beams
+        X.fillStyle = `rgba(255,255,200,0.03)`;
+        X.beginPath();
+        X.moveTo(lx - 20, H * 0.1);
+        X.lineTo(lx - 100, H);
+        X.lineTo(lx + 100, H);
+        X.lineTo(lx + 20, H * 0.1);
+        X.closePath();
+        X.fill();
+      }
+      X.fillStyle = '#2a3a2a';
+      X.fillRect(0, H * 0.65, W, H * 0.35);
+      break;
+    case 'space':
+      // Nebula background
+      g = X.createRadialGradient(W * 0.3, H * 0.4, 50, W * 0.5, H * 0.5, H);
+      g.addColorStop(0, '#2a1a4a');
+      g.addColorStop(0.3, '#1a0a3a');
+      g.addColorStop(0.6, '#0a0a2a');
+      g.addColorStop(1, '#050510');
+      X.fillStyle = g;
+      X.fillRect(0, 0, W, H);
+      // Nebula clouds
+      for (let i = 0; i < 5; i++) {
+        const nx = (W * 0.2 + i * W * 0.15 + celebFrame * 0.1) % (W + 200) - 100;
+        const ny = H * 0.2 + Math.sin(i * 2.1) * H * 0.2;
+        const ng = X.createRadialGradient(nx, ny, 0, nx, ny, 80);
+        const hue = (i * 60 + celebFrame * 0.3) % 360;
+        ng.addColorStop(0, `hsla(${hue}, 70%, 50%, 0.15)`);
+        ng.addColorStop(1, 'transparent');
+        X.fillStyle = ng;
+        X.fillRect(nx - 100, ny - 100, 200, 200);
+      }
+      // Stars
+      for (let i = 0; i < 150; i++) {
+        const sx = (i * 137.5) % W;
+        const sy = (i * 73.1) % H;
+        X.fillStyle = `rgba(255,255,255,${0.3 + 0.7 * Math.abs(Math.sin(celebFrame * 0.02 + i))})`;
+        X.beginPath();
+        X.arc(sx, sy, 0.5 + (i % 3) * 0.5, 0, Math.PI * 2);
+        X.fill();
+      }
+      break;
+  }
+}
+
+function renderCelebration() {
+  celebFrame++;
+  const f = celebFrame;
+  const confettiColors = ['#e44', '#4e4', '#44e', '#ee4', '#e4e', '#4ee', '#fa0'];
+
+  switch(level) {
+    case 0: // LEVEL 1 - Humble Farmer
+      celebrationBg('farm');
+      // Corn stalks on sides
+      for (let i = 0; i < 6; i++) {
+        const sx = i < 3 ? 50 + i * 50 : W - 50 - (5 - i) * 50;
+        const sw = Math.sin(f * 0.02 + i) * 3;
+        X.strokeStyle = '#6a8a3a';
+        X.lineWidth = 4;
+        X.beginPath();
+        X.moveTo(sx + sw, H);
+        X.quadraticCurveTo(sx + sw * 2, H * 0.5, sx + sw * 3, H * 0.2);
+        X.stroke();
+      }
+      drawFarmer(W / 2, H * 0.65, 1.5, f * 0.08);
+      if (f > 60) {
+        X.font = 'italic 22px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = '#E8D5B0';
+        X.fillText('"Not bad for a city slicker!"', W / 2, H * 0.4);
+      }
+      if (f > 90 && f % 40 === 0) spawnConfetti(W / 2, H * 0.3, 3, confettiColors);
+      break;
+
+    case 1: // LEVEL 2 - Small Crowd
+      celebrationBg('town');
+      // Banner
+      if (f > 30) {
+        const bannerY = Math.max(H * 0.15, H * 0.5 - f * 0.8);
+        X.fillStyle = '#c44';
+        roundRect(X, W / 2 - 140, bannerY, 280, 50, 8);
+        X.fill();
+        X.font = 'bold 28px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = '#fff';
+        X.fillText('NICE JOB!', W / 2, bannerY + 35);
+      }
+      // Crowd
+      const crowdColors = ['#c44', '#44c', '#4a4', '#cc4', '#c4c', '#4cc', '#a55', '#5a5'];
+      for (let i = 0; i < 8; i++) {
+        const cx = 200 + i * 75;
+        const cy = H * 0.75;
+        const armUp = Math.sin(f * 0.06 + i * 1.5) > 0.2;
+        drawPerson(cx, cy, 1.2, crowdColors[i], armUp);
+      }
+      // Dog running around
+      if (f > 50) {
+        const dogX = (f * 3) % (W + 100) - 50;
+        X.fillStyle = '#8B4513';
+        X.beginPath();
+        X.ellipse(dogX, H * 0.82, 12, 8, 0, 0, Math.PI * 2);
+        X.fill();
+        X.beginPath();
+        X.arc(dogX + 14, H * 0.82 - 5, 6, 0, Math.PI * 2);
+        X.fill();
+        // Wagging tail
+        X.strokeStyle = '#8B4513';
+        X.lineWidth = 3;
+        X.beginPath();
+        X.moveTo(dogX - 12, H * 0.82 - 2);
+        X.lineTo(dogX - 18, H * 0.82 - 8 + Math.sin(f * 0.3) * 5);
+        X.stroke();
+      }
+      if (f % 20 === 0) spawnConfetti(W / 2 + (Math.random() - 0.5) * 300, H * 0.2, 8, confettiColors);
+      break;
+
+    case 2: // LEVEL 3 - Fireworks & Champagne
+      celebrationBg('night');
+      // Fireworks
+      if (f % 45 === 0 || f % 67 === 0 || f % 31 === 0) {
+        const fx = 100 + Math.random() * (W - 200);
+        const fy = 50 + Math.random() * H * 0.4;
+        const fcolor = `hsl(${Math.random() * 360}, 80%, 65%)`;
+        spawnFirework(fx, fy, fcolor);
+      }
+      // Champagne bottle
+      if (f > 40) {
+        const bx = W * 0.5, by = H * 0.65;
+        // Bottle
+        X.fillStyle = '#2a5a2a';
+        X.fillRect(bx - 10, by - 30, 20, 50);
+        X.fillRect(bx - 5, by - 45, 10, 18);
+        X.fillStyle = '#DAA520';
+        X.fillRect(bx - 8, by - 32, 16, 6);
+        // Cork spray
+        if (f > 60) {
+          const spray = Math.min(1, (f - 60) / 30);
+          for (let i = 0; i < 8; i++) {
+            const sa = -Math.PI / 2 + (i / 7 - 0.5) * 1.2;
+            const sd = spray * 60 + Math.sin(f * 0.1 + i) * 10;
+            X.fillStyle = `rgba(255,215,0,${0.6 - spray * 0.4})`;
+            X.beginPath();
+            X.arc(bx + Math.cos(sa) * sd, by - 45 + Math.sin(sa) * sd, 2 + Math.random() * 3, 0, Math.PI * 2);
+            X.fill();
+          }
+        }
+      }
+      // Text
+      if (f > 80) {
+        X.font = 'bold 32px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = '#FFD700';
+        X.fillText('YOU\'RE A MAZE LEGEND!', W / 2, H * 0.35);
+      }
+      if (f % 10 === 0) spawnConfetti(Math.random() * W, -10, 5, ['#FFD700', '#C0C0C0', '#fff']);
+      break;
+
+    case 3: // LEVEL 4 - THE ABSURD SPECTACULAR
+      celebrationBg('stadium');
+      // Laser beams
+      for (let i = 0; i < 8; i++) {
+        const la = celebFrame * 0.02 + i * Math.PI / 4;
+        const lx = W / 2 + Math.cos(la) * W * 0.4;
+        const ly = H * 0.1;
+        X.strokeStyle = `hsla(${(i * 45 + f) % 360}, 100%, 60%, 0.3)`;
+        X.lineWidth = 3;
+        X.beginPath();
+        X.moveTo(W / 2, H * 0.05);
+        X.lineTo(lx, H);
+        X.stroke();
+      }
+      // Disco ball
+      X.fillStyle = '#ccc';
+      X.beginPath();
+      X.arc(W / 2, H * 0.08, 20, 0, Math.PI * 2);
+      X.fill();
+      for (let i = 0; i < 8; i++) {
+        X.fillStyle = i % 2 === 0 ? '#fff' : '#aaa';
+        const da = i * Math.PI / 4 + f * 0.03;
+        X.beginPath();
+        X.arc(W / 2 + Math.cos(da) * 12, H * 0.08 + Math.sin(da) * 12, 4, 0, Math.PI * 2);
+        X.fill();
+      }
+      // Elephants marching
+      if (f > 30) {
+        const e1x = -100 + Math.min(f - 30, 200) * 2;
+        const e2x = -200 + Math.min(f - 30, 250) * 2;
+        drawElephant(Math.min(e1x, W * 0.35), H * 0.55, 1.0);
+        drawElephant(Math.min(e2x, W * 0.65), H * 0.55, 1.0);
+      }
+      // Helicopter dropping roses
+      if (f > 80) {
+        const hx = (f * 2.5) % (W + 200) - 100;
+        // Helicopter body
+        X.fillStyle = '#555';
+        X.beginPath();
+        X.ellipse(hx, H * 0.18, 30, 12, 0, 0, Math.PI * 2);
+        X.fill();
+        // Rotor
+        X.strokeStyle = '#777';
+        X.lineWidth = 3;
+        const rotAngle = f * 0.4;
+        X.beginPath();
+        X.moveTo(hx - Math.cos(rotAngle) * 35, H * 0.18 - 14);
+        X.lineTo(hx + Math.cos(rotAngle) * 35, H * 0.18 - 14);
+        X.stroke();
+        // Drop roses
+        if (f % 15 === 0) {
+          particles.push(new Particle(hx, H * 0.22, (Math.random() - 0.5) * 2, 0, '#e44', 5, 200));
+        }
+      }
+      // Bald eagle with banner
+      if (f > 120) {
+        const ex = W + 100 - Math.min(f - 120, 300) * 2;
+        // Eagle body
+        X.fillStyle = '#4a3520';
+        X.beginPath();
+        X.ellipse(ex, H * 0.28, 20, 10, 0, 0, Math.PI * 2);
+        X.fill();
+        // White head
+        X.fillStyle = '#fff';
+        X.beginPath();
+        X.arc(ex + 18, H * 0.28 - 3, 8, 0, Math.PI * 2);
+        X.fill();
+        // Wings
+        const wingFlap = Math.sin(f * 0.15) * 8;
+        X.fillStyle = '#3a2515';
+        X.beginPath();
+        X.moveTo(ex - 5, H * 0.28);
+        X.lineTo(ex - 30, H * 0.28 - 20 + wingFlap);
+        X.lineTo(ex + 5, H * 0.28);
+        X.fill();
+        X.beginPath();
+        X.moveTo(ex - 5, H * 0.28);
+        X.lineTo(ex - 30, H * 0.28 + 10 - wingFlap);
+        X.lineTo(ex + 5, H * 0.28);
+        X.fill();
+        // Banner trailing behind
+        X.fillStyle = '#fff';
+        roundRect(X, ex + 35, H * 0.25, 160, 25, 5);
+        X.fill();
+        X.font = 'bold 16px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = '#c44';
+        X.fillText('ABSOLUTE LEGEND', ex + 115, H * 0.25 + 18);
+      }
+      // T-Rex moonwalking
+      if (f > 160) {
+        const tx = W * 0.5 + Math.sin(f * 0.015) * 100;
+        X.fillStyle = '#5a8a3a';
+        // Body
+        X.beginPath();
+        X.ellipse(tx, H * 0.78, 25, 18, -0.2, 0, Math.PI * 2);
+        X.fill();
+        // Head
+        X.beginPath();
+        X.ellipse(tx + 28, H * 0.73, 15, 10, -0.3, 0, Math.PI * 2);
+        X.fill();
+        // Tiny arms
+        X.strokeStyle = '#5a8a3a';
+        X.lineWidth = 3;
+        X.beginPath();
+        X.moveTo(tx + 10, H * 0.78);
+        X.lineTo(tx + 15, H * 0.78 + 8 + Math.sin(f * 0.2) * 3);
+        X.stroke();
+        // Legs moonwalking
+        const legPhase = f * 0.1;
+        X.lineWidth = 5;
+        X.beginPath();
+        X.moveTo(tx - 8, H * 0.78 + 14);
+        X.lineTo(tx - 8 + Math.sin(legPhase) * 8, H * 0.78 + 30);
+        X.moveTo(tx + 8, H * 0.78 + 14);
+        X.lineTo(tx + 8 + Math.sin(legPhase + Math.PI) * 8, H * 0.78 + 30);
+        X.stroke();
+        // Sunglasses
+        X.fillStyle = '#111';
+        X.fillRect(tx + 20, H * 0.72, 12, 5);
+        X.fillRect(tx + 34, H * 0.72, 12, 5);
+      }
+      // Text
+      if (f > 60) {
+        X.font = 'bold 28px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = '#FFD700';
+        const texts = ['ELEPHANTS!', 'HELICOPTERS!', 'A BALD EAGLE?!', 'A MOONWALKING T-REX?!'];
+        const ti = Math.min(Math.floor((f - 60) / 50), texts.length - 1);
+        X.fillText(texts[ti], W / 2, H * 0.42);
+      }
+      if (f % 8 === 0) spawnConfetti(Math.random() * W, -10, 6, confettiColors);
+      if (f % 30 === 0) spawnFirework(Math.random() * W, Math.random() * H * 0.3 + 50, `hsl(${Math.random() * 360}, 90%, 60%)`);
+      break;
+
+    case 4: // LEVEL 5 - REALITY IMPLODES
+      celebrationBg('space');
+      // Swirling portal
+      if (f > 20) {
+        const portalSize = Math.min(80, (f - 20) * 0.5);
+        for (let ring = 0; ring < 5; ring++) {
+          const r = portalSize - ring * 12;
+          if (r <= 0) continue;
+          const hue = (ring * 60 + f * 3) % 360;
+          X.strokeStyle = `hsla(${hue}, 100%, 60%, 0.5)`;
+          X.lineWidth = 4;
+          X.beginPath();
+          X.arc(W * 0.15, H * 0.4, r, f * 0.05 + ring, f * 0.05 + ring + Math.PI * 1.5);
+          X.stroke();
+        }
+        X.font = '11px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = 'rgba(200,150,255,0.5)';
+        X.fillText('The Corn Dimension', W * 0.15, H * 0.4 + portalSize + 15);
+      }
+      // UFO
+      if (f > 40) {
+        const ufoY = Math.max(H * 0.12, H * 0.5 - (f - 40) * 1.5);
+        drawUFO(W * 0.7, ufoY, 1.2, f > 80);
+        if (f > 100) {
+          // Alien emerges
+          X.fillStyle = '#7aff7a';
+          X.beginPath();
+          X.ellipse(W * 0.7, ufoY + 80 + Math.sin(f * 0.05) * 5, 8, 12, 0, 0, Math.PI * 2);
+          X.fill();
+          X.beginPath();
+          X.arc(W * 0.7, ufoY + 65 + Math.sin(f * 0.05) * 5, 7, 0, Math.PI * 2);
+          X.fill();
+          // Big eyes
+          X.fillStyle = '#000';
+          X.beginPath();
+          X.ellipse(W * 0.7 - 4, ufoY + 63, 3, 4, 0, 0, Math.PI * 2);
+          X.ellipse(W * 0.7 + 4, ufoY + 63, 3, 4, 0, 0, Math.PI * 2);
+          X.fill();
+          // Peace sign
+          X.font = '14px serif';
+          X.fillText('\u270C', W * 0.7 + 12, ufoY + 70);
+        }
+      }
+      // Whale with top hat playing trumpet
+      if (f > 80) {
+        const whaleX = W * 0.45 + Math.sin(f * 0.008) * 50;
+        const whaleY = H * 0.35 + Math.sin(f * 0.012) * 20;
+        drawWhale(whaleX, whaleY, 0.8, true);
+        drawTrumpet(whaleX + 42, whaleY - 2, 0.8, Math.sin(f * 0.05) * 0.1);
+      }
+      // Cats in sombreros parachuting
+      if (f > 120) {
+        for (let i = 0; i < 4; i++) {
+          const catX = 150 + i * 200 + Math.sin(f * 0.02 + i * 2) * 30;
+          const catY = ((f - 120 + i * 40) * 0.8) % (H + 100) - 50;
+          drawCatInSombrero(catX, catY, 0.8);
+        }
+      }
+      // Farmer from level 1 riding a rocket
+      if (f > 160) {
+        const rocketX = -50 + Math.min((f - 160) * 4, W + 200);
+        const rocketY = H * 0.7 - Math.min((f - 160) * 1.5, H * 0.5);
+        // Rocket
+        X.fillStyle = '#ddd';
+        X.save();
+        X.translate(rocketX, rocketY);
+        X.rotate(-0.5);
+        X.fillRect(-8, -25, 16, 50);
+        X.fillStyle = '#e44';
+        X.beginPath();
+        X.moveTo(-8, -25); X.lineTo(0, -40); X.lineTo(8, -25);
+        X.closePath();
+        X.fill();
+        // Flame
+        X.fillStyle = `hsl(${30 + Math.random() * 20}, 100%, 55%)`;
+        X.beginPath();
+        X.moveTo(-6, 25); X.lineTo(0, 25 + 15 + Math.random() * 10); X.lineTo(6, 25);
+        X.closePath();
+        X.fill();
+        X.restore();
+        // Tiny farmer on rocket
+        drawFarmer(rocketX, rocketY - 30, 0.4, f * 0.1);
+      }
+      // Dancing corn stalks
+      if (f > 60) {
+        for (let i = 0; i < 6; i++) {
+          const cx = 80 + i * 160;
+          const cy = H * 0.85;
+          const dance = Math.sin(f * 0.08 + i * 1.5) * 12;
+          X.strokeStyle = '#8a9a46';
+          X.lineWidth = 5;
+          X.beginPath();
+          X.moveTo(cx, cy + 30);
+          X.quadraticCurveTo(cx + dance, cy - 10, cx + dance * 1.5, cy - 50);
+          X.stroke();
+          // Tassel
+          X.fillStyle = '#C8B432';
+          X.beginPath();
+          X.arc(cx + dance * 1.5, cy - 52, 5, 0, Math.PI * 2);
+          X.fill();
+          // Tiny face on corn
+          X.fillStyle = '#333';
+          X.beginPath();
+          X.arc(cx + dance * 0.8 - 3, cy - 20, 1.5, 0, Math.PI * 2);
+          X.arc(cx + dance * 0.8 + 3, cy - 20, 1.5, 0, Math.PI * 2);
+          X.fill();
+          X.strokeStyle = '#333';
+          X.lineWidth = 1;
+          X.beginPath();
+          X.arc(cx + dance * 0.8, cy - 16, 3, 0.1, Math.PI - 0.1);
+          X.stroke();
+        }
+      }
+      // Kaleidoscope overlay
+      if (f > 200) {
+        const kAlpha = Math.min(0.15, (f - 200) * 0.001);
+        X.globalAlpha = kAlpha;
+        for (let i = 0; i < 6; i++) {
+          const ka = f * 0.01 + i * Math.PI / 3;
+          const kx = W / 2 + Math.cos(ka) * 200;
+          const ky = H / 2 + Math.sin(ka) * 150;
+          const kg = X.createRadialGradient(kx, ky, 0, kx, ky, 100);
+          kg.addColorStop(0, `hsla(${(f * 2 + i * 60) % 360}, 100%, 60%, 0.5)`);
+          kg.addColorStop(1, 'transparent');
+          X.fillStyle = kg;
+          X.fillRect(kx - 100, ky - 100, 200, 200);
+        }
+        X.globalAlpha = 1;
+      }
+      // Epic scrolling text
+      if (f > 100) {
+        const texts = [
+          "The corn... it speaks...",
+          "It says...",
+          "WELL DONE, MAZE CHAMPION.",
+          "Reality will never be the same.",
+          "The corn remembers.",
+          "The corn always remembers."
+        ];
+        const ti = Math.min(Math.floor((f - 100) / 60), texts.length - 1);
+        X.font = ti >= 2 ? 'bold 28px Georgia, serif' : 'italic 22px Georgia, serif';
+        X.textAlign = 'center';
+        X.fillStyle = ti >= 2 ? '#FFD700' : '#B0A0D0';
+        X.fillText(texts[ti], W / 2, H * 0.88);
+      }
+      // Constant celebration
+      if (f % 6 === 0) spawnConfetti(Math.random() * W, -10, 4, confettiColors);
+      if (f % 25 === 0) spawnFirework(Math.random() * W, Math.random() * H * 0.3, `hsl(${Math.random() * 360}, 100%, 65%)`);
+      break;
+  }
+
+  // Update and draw particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    particles[i].draw(X);
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+
+  // Continue prompt
+  if (f > 180) {
+    const pulse = 0.5 + 0.5 * Math.sin(f * 0.04);
+    X.globalAlpha = 0.6 + pulse * 0.4;
+    X.font = '20px Georgia, serif';
+    X.textAlign = 'center';
+    X.fillStyle = '#FFD700';
+    if (level < 4) X.fillText('Press ENTER for next level', W / 2, H - 30);
+    else X.fillText('Press ENTER to finish', W / 2, H - 30);
+    X.globalAlpha = 1;
+  }
+}
+
+// -- Game Complete Screen --
+function renderComplete() {
+  const bg = X.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#1a0a30');
+  bg.addColorStop(1, '#0a1a10');
+  X.fillStyle = bg;
+  X.fillRect(0, 0, W, H);
+
+  // Floating golden particles
+  for (let i = 0; i < 30; i++) {
+    const px = (i * 37 + Date.now() * 0.01) % W;
+    const py = (i * 23 + Date.now() * 0.008) % H;
+    X.fillStyle = `rgba(200,169,110,${0.2 + Math.sin(Date.now() * 0.002 + i) * 0.15})`;
+    X.beginPath();
+    X.arc(px, py, 2, 0, Math.PI * 2);
+    X.fill();
+  }
+
+  X.textAlign = 'center';
+
+  X.font = 'bold 48px Georgia, serif';
+  X.fillStyle = '#C8A96E';
+  X.fillText('THE CORN IS CONQUERED', W / 2, H * 0.25);
+
+  X.font = 'italic 22px Georgia, serif';
+  X.fillStyle = '#8a9a6a';
+  X.fillText('All 5 mazes completed. The corn acknowledges your supremacy.', W / 2, H * 0.38);
+
+  const totalSecs = Math.floor(totalTime / 60);
+  const totalMins = Math.floor(totalSecs / 60);
+  X.font = '18px Georgia, serif';
+  X.fillStyle = '#7a8a5a';
+  X.fillText(`Total time: ${totalMins}:${(totalSecs % 60).toString().padStart(2, '0')}`, W / 2, H * 0.50);
+
+  // Credits
+  X.font = '14px Georgia, serif';
+  X.fillStyle = '#5a6a4a';
+  X.fillText('Lead Corn Wrangler: You', W / 2, H * 0.62);
+  X.fillText('Corn Choreography: The Wind', W / 2, H * 0.67);
+  X.fillText('Elephant Logistics: Dave', W / 2, H * 0.72);
+  X.fillText('Whale Trumpet Instructor: Professor Barnacles', W / 2, H * 0.77);
+  X.fillText('Cat Sombrero Outfitter: El Gato Grande', W / 2, H * 0.82);
+
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.003);
+  X.globalAlpha = 0.5 + pulse * 0.5;
+  X.font = '20px Georgia, serif';
+  X.fillStyle = '#C8A96E';
+  X.fillText('Press ENTER to return to title', W / 2, H * 0.93);
+  X.globalAlpha = 1;
+}
+
+// -- Main Loop --
+function loop() {
+  switch(state) {
+    case 'title':
+      renderTitle();
+      break;
+    case 'playing':
+      updatePlayer();
+      render3D();
+      renderMinimap();
+      renderHUD();
+      renderComment();
+      break;
+    case 'celebrating':
+      renderCelebration();
+      break;
+    case 'complete':
+      renderComplete();
+      break;
+  }
+  requestAnimationFrame(loop);
+}
+
+// Resize canvas to fit window while maintaining aspect ratio
+function resize() {
+  const ratio = W / H;
+  const wRatio = window.innerWidth / W;
+  const hRatio = window.innerHeight / H;
+  const scale = Math.min(wRatio, hRatio);
+  C.style.width = (W * scale) + 'px';
+  C.style.height = (H * scale) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Start
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
